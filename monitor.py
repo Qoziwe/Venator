@@ -56,8 +56,16 @@ _known_chats: dict[int, str] = {}
 _folder_chat_ids: set[int] = set()
 _alerted_bans: set[int] = set()
 
-# Cooldown tracking for error alerts to prevent spamming Telegram on repeated errors
 _last_error_alerts: dict[str, float] = {}
+
+_llm_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_llm_semaphore() -> asyncio.Semaphore:
+    global _llm_semaphore
+    if _llm_semaphore is None:
+        _llm_semaphore = asyncio.Semaphore(1)
+    return _llm_semaphore
 
 
 def send_error_alert(title: str, details: str, cooldown_seconds: int = 180) -> None:
@@ -243,58 +251,92 @@ def analyze_post_with_llm(
         is_429 = (status_code == 429) or ("429" in err_str) or ("rate_limit" in err_lower)
         is_auth_error = status_code in (401, 403)
 
-        # Detect daily quota exhaustion
-        is_daily_quota = is_auth_error or any(
-            marker in err_lower
-            for marker in (
-                "tokens per day",
-                "requests per day",
-                "tpd",
-                "rpd",
-                "per day",
-                "daily",
-                "insufficient_quota",
-                "quota_exceeded",
-                "exceeded your current quota",
-                "billing",
+        # Parse wait time from error message:
+        # e.g. "try again in 1m17.759s" or "try again in 7.965s" or "try again in 97.499999ms"
+        wait_s = 0.0
+        m_min_s = re.search(r"try again in (\d+)m([0-9.]+)\s*s", err_str, re.IGNORECASE)
+        m_s = re.search(r"try again in ([0-9.]+)\s*s", err_str, re.IGNORECASE)
+        m_ms = re.search(r"try again in ([0-9.]+)\s*ms", err_str, re.IGNORECASE)
+
+        if m_min_s:
+            wait_s = int(m_min_s.group(1)) * 60 + float(m_min_s.group(2))
+        elif m_ms:
+            wait_s = max(0.2, float(m_ms.group(1)) / 1000.0)
+        elif m_s:
+            wait_s = float(m_s.group(1))
+
+        # Check specifically for minute rate limits (TPM / RPM)
+        is_minute_limit = any(
+            marker in err_lower for marker in (
+                "tokens per minute",
+                "requests per minute",
+                "(tpm)",
+                "(rpm)",
+                "per minute",
+                "queries per minute",
             )
         )
 
-        # Handle short TPM bursts (e.g. "try again in 10s") before switching keys
-        if is_429 and not is_daily_quota:
-            m = re.search(r"try again in ([0-9.]+)\s*s", err_str, re.IGNORECASE)
-            wait_s = float(m.group(1)) if m else 0.0
-            if 0 < wait_s <= 12.0:
+        # Check specifically for daily quota exhaustion (TPD / RPD / Insufficient Quota)
+        # Note: we do NOT check "billing" because Groq appends billing URL to every 429 message!
+        is_daily_quota = is_auth_error or any(
+            marker in err_lower for marker in (
+                "tokens per day",
+                "requests per day",
+                "(tpd)",
+                "(rpd)",
+                "tokens/day",
+                "requests/day",
+                "queries per day",
+                "insufficient_quota",
+                "exceeded your current quota",
+                "quota_exceeded",
+            )
+        )
+
+        # Handle short TPM/RPM bursts (e.g. "try again in 7s" or "97ms") without burning backup keys
+        if is_429 and is_minute_limit and not is_daily_quota and wait_s <= 15.0:
+            for retry_num in range(2):
+                actual_wait = wait_s if wait_s > 0 else 2.5
                 logging.info(
-                    f"⏳ TPM burst limit on Key #{key_idx + 1}. Waiting {wait_s:.1f}s before retry..."
+                    f"⏳ TPM burst on Key #{key_idx + 1} (retry {retry_num + 1}/2). Waiting {actual_wait:.1f}s..."
                 )
-                time.sleep(wait_s + 0.5)
-                # Retry once with current key
+                time.sleep(actual_wait + 0.5)
                 parsed, err_msg, status_code = _send_llm_request(
                     api_url, api_key, model, system_prompt, user_prompt
                 )
                 if parsed is not None:
                     parsed["_key_index"] = key_idx
                     return parsed
+
                 err_str = str(err_msg or "")
                 err_lower = err_str.lower()
+                m_s = re.search(r"try again in ([0-9.]+)\s*s", err_str, re.IGNORECASE)
+                m_ms = re.search(r"try again in ([0-9.]+)\s*ms", err_str, re.IGNORECASE)
+                if m_ms:
+                    wait_s = max(0.2, float(m_ms.group(1)) / 1000.0)
+                elif m_s:
+                    wait_s = float(m_s.group(1))
+                else:
+                    break
 
-        # If key quota or limits are exhausted, failover to the next key
+        # If key quota or persistent rate limits are exhausted, failover to the next key
         if is_429 or is_auth_error or is_daily_quota:
             logging.warning(
                 f"⚠️ Key #{key_idx + 1} quota/limit exhausted ({err_str}). Switching to next key..."
             )
             next_key, next_idx = database.failover_to_next_key(key_idx, reason=err_str)
             if next_key is not None and next_idx is not None:
-                send_bot_notification(
-                    f"🔄 <b>Venator: Ротация API-ключей</b>\n"
-                    f"⚠️ <b>Ключ #{key_idx + 1}</b> исчерпал лимит/квоту.\n"
-                    f"➡️ Автоматически переключено на <b>Ключ #{next_idx + 1}</b> (из 3).\n"
-                    f"Пост отправлен на повторный анализ."
-                )
-                logging.info(
-                    f"🔄 Switched from Key #{key_idx + 1} to Key #{next_idx + 1}. Retrying post..."
-                )
+                if next_idx != key_idx:
+                    send_bot_notification(
+                        f"🔄 <b>Venator: Ротация API-ключей</b>\n"
+                        f"⚠️ <b>Ключ #{key_idx + 1}</b> исчерпал суточный лимит (HTTP 429 / Quota).\n"
+                        f"➡️ Автоматически переключено на <b>Ключ #{next_idx + 1}</b> (из 3).\n"
+                        f"Пост отправлен на повторный анализ."
+                    )
+                    logging.info(
+                        f"🔄 Switched from Key #{key_idx + 1} to Key #{next_idx + 1}. Retrying post..."
+                    )
                 continue
 
             # All configured keys (up to 3) are exhausted
@@ -686,12 +728,13 @@ async def _run_telethon_loop(interactive_auth: bool = False) -> None:
                 clean_id = str(event.chat_id).replace("-100", "").replace("-", "")
                 msg_link = f"https://t.me/c/{clean_id}/{event.id}"
 
-            # 3. Evaluate EVERY new message with LLM
-            logging.info(f"🧠 Calling LLM ({cfg.get('llm_model')}) for '{chat_title}'...")
+            # 3. Evaluate EVERY new message with LLM (serialized via semaphore to prevent TPM bursts)
             loop = asyncio.get_running_loop()
-            verdict = await loop.run_in_executor(
-                None, analyze_post_with_llm, raw_text
-            )
+            async with _get_llm_semaphore():
+                logging.info(f"🧠 Calling LLM ({cfg.get('llm_model')}) for '{chat_title}'...")
+                verdict = await loop.run_in_executor(
+                    None, analyze_post_with_llm, raw_text
+                )
             if not verdict or "_error" in verdict:
                 err_msg = str(verdict.get('_error') if verdict else 'Empty response from LLM provider')
                 logging.error(f"❌ LLM error: {err_msg}")

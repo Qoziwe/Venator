@@ -455,7 +455,15 @@ def failover_to_next_key(current_index: int, reason: str = "") -> tuple[str | No
             str(cfg.get("llm_api_key_2", "")).strip(),
             str(cfg.get("llm_api_key_3", "")).strip(),
         ]
+        active_idx = int(cfg.get("llm_active_key_index", 0))
         exhausted = set(cfg.get("llm_exhausted_keys", []))
+
+        # Concurrency safeguard: if another thread has already advanced to a higher active key,
+        # reuse that newly active key instead of skipping it!
+        if active_idx > current_index and (active_idx not in exhausted):
+            if 0 <= active_idx < len(keys) and keys[active_idx]:
+                return keys[active_idx], active_idx
+
         exhausted.add(current_index)
 
         # Search for the next available key strictly in sequential order (current_index + 1 .. 2)
