@@ -1,0 +1,844 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Venator // AI Order Radar Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  </head>
+  <body class="bg-zinc-950 text-zinc-100 min-h-screen font-mono text-sm">
+    <!-- Top Bar -->
+    <header
+      class="border-b border-zinc-800 bg-zinc-900/80 backdrop-blur sticky top-0 z-30"
+    >
+      <div
+        class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3"
+      >
+        <div class="flex items-center gap-3">
+          <span class="text-lg font-bold tracking-wider text-emerald-400"
+            >VENATOR</span
+          >
+          <span
+            id="listener-badge"
+            class="px-2.5 py-0.5 text-xs rounded border font-semibold"
+          >
+            {{ monitor_status.status }}
+          </span>
+          <span
+            id="power-badge"
+            class="px-2.5 py-0.5 text-xs rounded bg-zinc-800 border border-zinc-700 text-emerald-400"
+          >
+            SYNC: ACTIVE (15s)
+          </span>
+        </div>
+
+        <div class="flex items-center gap-3 text-xs">
+          <span class="text-zinc-400">
+            Listener:
+            <strong id="listener-account" class="text-zinc-200"
+              >@{{ monitor_status.account_username or 'N/A' }}</strong
+            >
+            (<span id="listener-chats"
+              >{{ monitor_status.monitored_chats }}</span
+            >
+            chats)
+          </span>
+          <button
+            id="pause-btn"
+            onclick="togglePause()"
+            class="px-3 py-1.5 rounded border font-semibold transition cursor-pointer"
+          >
+            {{ 'RESUME RADAR' if settings.is_paused else 'PAUSE RADAR' }}
+          </button>
+          <a
+            href="/logout"
+            class="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700"
+          >
+            Logout
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 py-6 space-y-6">
+      <!-- Interactive Telegram QR & 2FA Web Auth Panel -->
+      <div
+        id="error-banner"
+        class="{{ 'block' if (monitor_status.error_message or monitor_status.status in ['AUTH_REQUIRED', 'QR_READY', '2FA_REQUIRED']) else 'hidden' }} p-5 rounded-lg bg-zinc-900 border border-amber-700/80 text-xs space-y-4"
+      >
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="text-amber-200">
+            <strong class="text-amber-400">[TELEGRAM LISTENER AUTH]:</strong>
+            <span id="error-banner-text"
+              >{{ monitor_status.error_message or 'Authorization required.'
+              }}</span
+            >
+          </div>
+          <button
+            id="qr-btn"
+            onclick="generateQrCode()"
+            class="{{ 'inline-block' if monitor_status.status in ['AUTH_REQUIRED', 'QR_READY'] else 'hidden' }} px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-bold uppercase tracking-wider cursor-pointer transition"
+          >
+            Generate QR Code
+          </button>
+        </div>
+
+        <!-- QR Code Canvas Container -->
+        <div
+          id="qr-container"
+          class="hidden flex flex-col items-center justify-center p-4 bg-zinc-950 border border-zinc-800 rounded space-y-3"
+        >
+          <div id="qr-canvas" class="p-3 bg-white rounded"></div>
+          <p class="text-zinc-400 text-center">
+            Open Telegram on your phone (<code>@qeleran</code>) ➔
+            <strong>Settings ➔ Devices ➔ Link Desktop Device</strong> and scan
+            this code.
+          </p>
+        </div>
+
+        <!-- 2FA Cloud Password Input -->
+        <div
+          id="twofa-container"
+          class="{{ 'flex' if monitor_status.status == '2FA_REQUIRED' else 'hidden' }} flex-wrap items-center gap-2 pt-1"
+        >
+          <input
+            type="password"
+            id="twofa-password"
+            placeholder="Enter Telegram 2FA Cloud Password..."
+            class="flex-1 min-w-[240px] bg-zinc-950 border border-zinc-700 rounded px-3 py-2 text-zinc-100"
+          />
+          <button
+            onclick="submit2FA()"
+            id="twofa-btn"
+            class="px-4 py-2 rounded bg-sky-600 hover:bg-sky-500 text-zinc-950 font-bold uppercase cursor-pointer"
+          >
+            Confirm 2FA Password
+          </button>
+        </div>
+      </div>
+
+      <!-- KPI Grid -->
+      <section class="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div class="bg-zinc-900 border border-zinc-800 rounded p-4">
+          <div class="text-xs text-zinc-400 uppercase">AI Evaluated</div>
+          <div id="kpi-total" class="text-2xl font-bold text-zinc-100 mt-1">
+            {{ stats.total_analyzed }}
+          </div>
+        </div>
+        <div class="bg-zinc-900 border border-emerald-900/60 rounded p-4">
+          <div class="text-xs text-emerald-400 uppercase">Approved Matches</div>
+          <div
+            id="kpi-approved"
+            class="text-2xl font-bold text-emerald-400 mt-1"
+          >
+            {{ stats.approved_count }}
+          </div>
+        </div>
+        <div class="bg-zinc-900 border border-red-900/60 rounded p-4">
+          <div class="text-xs text-red-400 uppercase">Scams Blocked</div>
+          <div id="kpi-scams" class="text-2xl font-bold text-red-400 mt-1">
+            {{ stats.scam_blocked }}
+          </div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded p-4">
+          <div class="text-xs text-zinc-400 uppercase">
+            RAM Dedup / Regex Saved
+          </div>
+          <div class="text-2xl font-bold text-sky-400 mt-1">
+            <span id="kpi-dedup">{{ monitor_status.duplicates_skipped }}</span>
+            / <span id="kpi-regex">{{ monitor_status.regex_skipped }}</span>
+          </div>
+        </div>
+        <div class="bg-zinc-900 border border-amber-900/60 rounded p-4">
+          <div class="text-xs text-amber-400 uppercase">Channel Ban Alerts</div>
+          <div id="kpi-bans" class="text-2xl font-bold text-amber-400 mt-1">
+            {{ stats.ban_alerts }}
+          </div>
+        </div>
+      </section>
+
+      <!-- Main 2-Column Layout -->
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <!-- Left Column: Configurable AI Engine & Prompts (5 cols) -->
+        <div class="lg:col-span-5 space-y-6">
+          <div
+            class="bg-zinc-900 border border-zinc-800 rounded-lg p-5 space-y-4"
+          >
+            <div
+              class="flex items-center justify-between border-b border-zinc-800 pb-3"
+            >
+              <h2 class="font-bold text-emerald-400 uppercase tracking-wider">
+                AI Engine & Model Switcher
+              </h2>
+              <span id="save-status" class="text-xs text-zinc-400"
+                >Key: {{ settings.api_key_preview }}</span
+              >
+            </div>
+
+            <div class="space-y-3">
+              <!-- Target Telegram Folder & Share Link -->
+              <div
+                class="p-3 bg-zinc-950 border border-emerald-900/60 rounded space-y-2.5"
+              >
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-bold text-emerald-400 uppercase"
+                    >Telegram Source Folder</span
+                  >
+                  <span class="text-xs text-zinc-400">
+                    Active:
+                    <strong id="folder-active-name" class="text-zinc-200"
+                      >{{ monitor_status.active_folder or settings.target_folder
+                      }}</strong
+                    >
+                  </span>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div>
+                    <label class="block text-xs text-zinc-400 mb-1"
+                      >Folder Name in Telegram</label
+                    >
+                    <input
+                      type="text"
+                      id="target_folder"
+                      value="{{ settings.target_folder }}"
+                      placeholder="Фриланс"
+                      class="w-full bg-zinc-900 border border-zinc-800 rounded px-2.5 py-1.5 text-xs text-zinc-100"
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-xs text-zinc-400 mb-1"
+                      >Shared Folder Link (t.me/addlist/...)</label
+                    >
+                    <input
+                      type="text"
+                      id="folder_invite_link"
+                      value="{{ settings.folder_invite_link }}"
+                      placeholder="https://t.me/addlist/..."
+                      class="w-full bg-zinc-900 border border-zinc-800 rounded px-2.5 py-1.5 text-xs text-zinc-100"
+                    />
+                  </div>
+                </div>
+                <details class="text-xs text-zinc-400">
+                  <summary class="cursor-pointer hover:text-zinc-200">
+                    Show monitored chats in folder (<span id="folder-chat-count"
+                      >{{ monitor_status.monitored_chats }}</span
+                    >)
+                  </summary>
+                  <div
+                    id="folder-chat-list"
+                    class="mt-2 p-2 bg-zinc-900 rounded text-zinc-300 max-h-32 overflow-y-auto space-y-1"
+                  >
+                    {% if monitor_status.monitored_chat_names %} {% for cname in
+                    monitor_status.monitored_chat_names %}
+                    <div>• {{ cname }}</div>
+                    {% endfor %} {% else %}
+                    <div class="text-zinc-500">
+                      No chats synced yet. Check folder name or paste a
+                      t.me/addlist/... link and click Save.
+                    </div>
+                    {% endif %}
+                  </div>
+                </details>
+              </div>
+
+              <div>
+                <label class="block text-xs text-zinc-400 mb-1"
+                  >AI Provider Preset</label
+                >
+                <select
+                  id="llm_provider"
+                  onchange="onProviderChange()"
+                  class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-zinc-100"
+                >
+                  {% for key, p in presets.items() %}
+                  <option value="{{ key }}">{{ p.label }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+
+              <div>
+                <label class="block text-xs text-zinc-400 mb-1"
+                  >OpenAI-Compatible Endpoint URL</label
+                >
+                <input
+                  type="text"
+                  id="llm_api_url"
+                  value="{{ settings.llm_api_url }}"
+                  class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-zinc-100 text-xs"
+                />
+              </div>
+
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <label class="block text-xs text-zinc-400 mb-1"
+                    >Quick Model Select</label
+                  >
+                  <select
+                    id="model_preset_select"
+                    onchange="onModelPresetSelect()"
+                    class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-zinc-100 text-xs"
+                  ></select>
+                </div>
+                <div>
+                  <label class="block text-xs text-zinc-400 mb-1"
+                    >Active Model ID</label
+                  >
+                  <input
+                    type="text"
+                    id="llm_model"
+                    value="{{ settings.llm_model }}"
+                    class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-emerald-400 font-semibold text-xs"
+                  />
+                </div>
+              </div>
+
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <div class="sm:col-span-2">
+                  <label class="block text-xs text-zinc-400 mb-1">
+                    New API Key (leave blank to keep current)
+                  </label>
+                  <input
+                    type="password"
+                    id="llm_api_key"
+                    placeholder="gsk_... / AIza... / sk-..."
+                    class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-zinc-100 text-xs"
+                  />
+                </div>
+                <div>
+                  <label class="block text-xs text-zinc-400 mb-1"
+                    >Min Score (%)</label
+                  >
+                  <input
+                    type="number"
+                    id="min_score"
+                    min="0"
+                    max="100"
+                    value="{{ settings.min_score }}"
+                    class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-zinc-100 text-xs"
+                  />
+                </div>
+              </div>
+
+              <details class="bg-zinc-950 border border-zinc-800 rounded p-3">
+                <summary
+                  class="text-xs font-semibold text-zinc-300 cursor-pointer"
+                >
+                  Regex Pre-Filters (Target & Stop Keywords)
+                </summary>
+                <div class="mt-3 space-y-3">
+                  <div>
+                    <label class="block text-xs text-zinc-400 mb-1"
+                      >Target Keywords (1 regex per line)</label
+                    >
+                    <textarea
+                      id="target_keywords"
+                      rows="5"
+                      class="w-full bg-zinc-900 border border-zinc-800 rounded p-2 text-xs text-zinc-200"
+                    >
+{{ settings.target_keywords }}</textarea
+                    >
+                  </div>
+                  <div>
+                    <label class="block text-xs text-zinc-400 mb-1"
+                      >Stop Keywords (1 regex per line)</label
+                    >
+                    <textarea
+                      id="stop_keywords"
+                      rows="4"
+                      class="w-full bg-zinc-900 border border-zinc-800 rounded p-2 text-xs text-zinc-200"
+                    >
+{{ settings.stop_keywords }}</textarea
+                    >
+                  </div>
+                </div>
+              </details>
+
+              <details class="bg-zinc-950 border border-zinc-800 rounded p-3">
+                <summary
+                  class="text-xs font-semibold text-zinc-300 cursor-pointer"
+                >
+                  AI System Prompt (Scam & Stack Rules)
+                </summary>
+                <div class="mt-3">
+                  <textarea
+                    id="system_prompt"
+                    rows="10"
+                    class="w-full bg-zinc-900 border border-zinc-800 rounded p-2 text-xs text-zinc-200"
+                  >
+{{ settings.system_prompt }}</textarea
+                  >
+                </div>
+              </details>
+
+              <button
+                onclick="saveSettings()"
+                class="w-full bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-bold py-2.5 rounded text-xs uppercase tracking-wider transition cursor-pointer"
+              >
+                Save & Hot-Reload Settings in RAM
+              </button>
+            </div>
+          </div>
+
+          <!-- Live AI Sandbox -->
+          <div
+            class="bg-zinc-900 border border-zinc-800 rounded-lg p-5 space-y-3"
+          >
+            <h2
+              class="font-bold text-sky-400 uppercase tracking-wider border-b border-zinc-800 pb-2"
+            >
+              AI Sandbox & Telegram Alert Tester
+            </h2>
+            <textarea
+              id="sandbox-text"
+              rows="3"
+              placeholder="Paste a sample job post here (e.g. 'Нужен разработчик сделать парсер Telegram каналов на Python и дашборд на React, бюджет 100 000 тг')..."
+              class="w-full bg-zinc-950 border border-zinc-800 rounded p-2.5 text-xs text-zinc-100"
+            ></textarea>
+            <div class="flex items-center justify-between gap-2">
+              <label
+                class="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  id="sandbox-send-tg"
+                  class="accent-emerald-500"
+                />
+                Also push result to Telegram (@LekimZlavdinov)
+              </label>
+              <button
+                onclick="runSandboxTest()"
+                id="sandbox-btn"
+                class="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-zinc-950 font-bold rounded text-xs cursor-pointer"
+              >
+                Test AI Model
+              </button>
+            </div>
+            <pre
+              id="sandbox-output"
+              class="hidden bg-zinc-950 border border-zinc-800 rounded p-3 text-xs text-emerald-300 overflow-x-auto whitespace-pre-wrap"
+            ></pre>
+          </div>
+
+          <!-- Channel Ban Log -->
+          <div
+            class="bg-zinc-900 border border-zinc-800 rounded-lg p-5 space-y-3"
+          >
+            <h2
+              class="font-bold text-amber-400 uppercase tracking-wider border-b border-zinc-800 pb-2"
+            >
+              Channel Kick / Ban Log
+            </h2>
+            <div
+              id="ban-list"
+              class="space-y-2 max-h-48 overflow-y-auto text-xs"
+            >
+              {% if bans %} {% for b in bans %}
+              <div class="p-2.5 bg-zinc-950 border border-amber-900/50 rounded">
+                <div class="flex justify-between text-amber-400 font-semibold">
+                  <span>[{{ b.event_type }}] {{ b.chat_title }}</span>
+                  <span class="text-zinc-500">{{ b.created_at }}</span>
+                </div>
+                <div class="text-zinc-400 mt-1">{{ b.details }}</div>
+              </div>
+              {% endfor %} {% else %}
+              <div class="text-zinc-500 py-2">
+                No channel bans or kicks recorded.
+              </div>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Column: Live Evaluated Orders Feed (7 cols) -->
+        <div class="lg:col-span-7">
+          <div
+            class="bg-zinc-900 border border-zinc-800 rounded-lg p-5 space-y-4"
+          >
+            <div
+              class="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-3"
+            >
+              <h2 class="font-bold text-zinc-100 uppercase tracking-wider">
+                Evaluated Vacancies & Orders
+              </h2>
+              <div class="flex items-center gap-1.5 text-xs">
+                <button
+                  onclick="setFilter('all')"
+                  id="flt-all"
+                  class="px-2.5 py-1 rounded bg-emerald-600 text-zinc-950 font-bold cursor-pointer"
+                >
+                  All
+                </button>
+                <button
+                  onclick="setFilter('approved')"
+                  id="flt-approved"
+                  class="px-2.5 py-1 rounded bg-zinc-800 text-zinc-300 cursor-pointer"
+                >
+                  Approved
+                </button>
+                <button
+                  onclick="setFilter('rejected')"
+                  id="flt-rejected"
+                  class="px-2.5 py-1 rounded bg-zinc-800 text-zinc-300 cursor-pointer"
+                >
+                  Rejected
+                </button>
+                <button
+                  onclick="setFilter('scam')"
+                  id="flt-scam"
+                  class="px-2.5 py-1 rounded bg-zinc-800 text-zinc-300 cursor-pointer"
+                >
+                  Scams
+                </button>
+                <button
+                  onclick="clearOrders()"
+                  class="ml-2 px-2.5 py-1 rounded bg-red-950/70 hover:bg-red-900 text-red-300 border border-red-800 cursor-pointer"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            <div
+              id="orders-container"
+              class="space-y-3 max-h-[780px] overflow-y-auto pr-1"
+            >
+              <!-- Populated dynamically via JS -->
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <script>
+          const PRESETS = {{ presets | tojson }};
+          let currentFilter = "all";
+          let isPaused = {{ 'true' if settings.is_paused else 'false' }};
+          let initialOrders = {{ orders | tojson }};
+          let pollTimer = null;
+
+          function populateModelDropdown(providerKey, selectedModel) {
+            const select = document.getElementById("model_preset_select");
+            select.innerHTML = "";
+            const preset = PRESETS[providerKey] || PRESETS["custom"];
+            (preset.models || []).forEach((m) => {
+              const opt = document.createElement("option");
+              opt.value = m;
+              opt.textContent = m;
+              if (m === selectedModel) opt.selected = true;
+              select.appendChild(opt);
+            });
+          }
+
+          function onProviderChange() {
+            const providerKey = document.getElementById("llm_provider").value;
+            const preset = PRESETS[providerKey];
+            if (preset) {
+              document.getElementById("llm_api_url").value = preset.api_url;
+              const firstModel = (preset.models && preset.models[0]) || "";
+              document.getElementById("llm_model").value = firstModel;
+              populateModelDropdown(providerKey, firstModel);
+            }
+          }
+
+          function onModelPresetSelect() {
+            const chosen = document.getElementById("model_preset_select").value;
+            if (chosen) {
+              document.getElementById("llm_model").value = chosen;
+            }
+          }
+
+          function escapeHtml(str) {
+            return String(str || "")
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;");
+          }
+
+          function renderOrders(orders) {
+            const container = document.getElementById("orders-container");
+            if (!orders || orders.length === 0) {
+              container.innerHTML = `<div class="text-zinc-500 text-xs py-8 text-center">No evaluated posts in this view yet.</div>`;
+              return;
+            }
+            container.innerHTML = orders.map((o) => {
+              let badge = `<span class="px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700">REJECTED (${o.match_score}%)</span>`;
+              let border = "border-zinc-800";
+              if (o.is_scam) {
+                badge = `<span class="px-2 py-0.5 rounded bg-red-950 text-red-400 border border-red-800 font-bold">SCAM BLOCKED (${o.match_score}%)</span>`;
+                border = "border-red-900/60";
+              } else if (o.approved) {
+                badge = `<span class="px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-bold">APPROVED (${o.match_score}%)</span>`;
+                border = "border-emerald-800/80";
+              }
+
+              return `
+                <div class="p-4 bg-zinc-950 border ${border} rounded space-y-2 text-xs">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div class="flex items-center gap-2">
+                      ${badge}
+                      <span class="font-bold text-zinc-200">${escapeHtml(o.chat_title)}</span>
+                    </div>
+                    <div class="flex items-center gap-3 text-zinc-500">
+                      <span>Model: ${escapeHtml(o.model_used)}</span>
+                      <span>${escapeHtml(o.created_at)}</span>
+                      <a href="${escapeHtml(o.msg_link)}" target="_blank" class="text-emerald-400 hover:underline font-semibold">Open Post ↗</a>
+                    </div>
+                  </div>
+                  <div class="text-zinc-200 font-semibold">${escapeHtml(o.summary)}</div>
+                  <div class="text-zinc-400">Verdict: ${escapeHtml(o.reason)} | Recommended Pitch: <code class="text-sky-400">${escapeHtml(o.recommended_pitch)}</code></div>
+                  <details class="text-zinc-500 pt-1">
+                    <summary class="cursor-pointer hover:text-zinc-300">Show original post text</summary>
+                    <div class="mt-2 p-2 bg-zinc-900 rounded whitespace-pre-wrap text-zinc-300">${escapeHtml(o.raw_text)}</div>
+                  </details>
+                </div>
+              `;
+            }).join("");
+          }
+
+          function updateStatusBadges(status, paused) {
+            const badge = document.getElementById("listener-badge");
+            badge.textContent = paused ? "PAUSED" : status;
+            if (paused) {
+              badge.className = "px-2.5 py-0.5 text-xs rounded border border-amber-700 bg-amber-950 text-amber-300 font-semibold";
+            } else if (status === "ONLINE") {
+              badge.className = "px-2.5 py-0.5 text-xs rounded border border-emerald-700 bg-emerald-950 text-emerald-300 font-semibold";
+            } else {
+              badge.className = "px-2.5 py-0.5 text-xs rounded border border-red-700 bg-red-950 text-red-300 font-semibold";
+            }
+
+            const pauseBtn = document.getElementById("pause-btn");
+            pauseBtn.textContent = paused ? "RESUME RADAR" : "PAUSE RADAR";
+            pauseBtn.className = paused
+              ? "px-3 py-1.5 rounded border border-emerald-700 bg-emerald-950/60 text-emerald-300 font-semibold cursor-pointer"
+              : "px-3 py-1.5 rounded border border-amber-700 bg-amber-950/60 text-amber-300 font-semibold cursor-pointer";
+          }
+
+          async function fetchState() {
+            if (document.hidden) return;
+            try {
+              const res = await fetch(`/api/state?filter=${currentFilter}`);
+              if (!res.ok) return;
+              const data = await res.json();
+              isPaused = data.is_paused;
+
+              document.getElementById("kpi-total").textContent = data.stats.total_analyzed;
+              document.getElementById("kpi-approved").textContent = data.stats.approved_count;
+              document.getElementById("kpi-scams").textContent = data.stats.scam_blocked;
+              document.getElementById("kpi-bans").textContent = data.stats.ban_alerts;
+              document.getElementById("kpi-dedup").textContent = data.monitor.duplicates_skipped;
+              document.getElementById("kpi-regex").textContent = data.monitor.regex_skipped;
+
+              document.getElementById("listener-account").textContent = "@" + (data.monitor.account_username || "N/A");
+              document.getElementById("listener-chats").textContent = data.monitor.monitored_chats;
+              document.getElementById("folder-active-name").textContent = data.monitor.active_folder || "Фриланс";
+              document.getElementById("folder-chat-count").textContent = data.monitor.monitored_chats;
+              const chatListEl = document.getElementById("folder-chat-list");
+              if (data.monitor.monitored_chat_names && data.monitor.monitored_chat_names.length > 0) {
+                chatListEl.innerHTML = data.monitor.monitored_chat_names.map((c) => `<div>• ${escapeHtml(c)}</div>`).join("");
+              } else {
+                chatListEl.innerHTML = `<div class="text-zinc-500">0 chats matched folder '${escapeHtml(data.monitor.active_folder)}'. Available folders on account: ${escapeHtml((data.monitor.available_folders || []).join(", ") || "None")}</div>`;
+              }
+
+              const errBanner = document.getElementById("error-banner");
+              if (data.monitor.error_message) {
+                errBanner.classList.remove("hidden");
+                document.getElementById("error-banner-text").textContent = data.monitor.error_message;
+              } else {
+                errBanner.classList.add("hidden");
+              }
+
+              updateStatusBadges(data.monitor.status, isPaused);
+              syncAuthPanel(data.monitor);
+              updateStatusBadges(data.monitor.status, isPaused);
+              renderOrders(data.orders);
+            } catch (e) {
+              console.error("State sync error:", e);
+            }
+          }
+          let lastRenderedQrUrl = null;
+
+      function syncAuthPanel(mon) {
+        const errBanner = document.getElementById("error-banner");
+        const qrBtn = document.getElementById("qr-btn");
+        const qrContainer = document.getElementById("qr-container");
+        const twofaContainer = document.getElementById("twofa-container");
+
+        const needsPanel = mon.error_message || ["AUTH_REQUIRED", "QR_READY", "2FA_REQUIRED"].includes(mon.status);
+        if (!needsPanel) {
+          errBanner.classList.add("hidden");
+          return;
+        }
+        errBanner.classList.remove("hidden");
+        document.getElementById("error-banner-text").textContent = mon.error_message || "";
+
+        if (["AUTH_REQUIRED", "QR_READY"].includes(mon.status)) {
+          qrBtn.classList.remove("hidden");
+        } else {
+          qrBtn.classList.add("hidden");
+        }
+
+        if (mon.status === "QR_READY" && mon.qr_url) {
+          qrContainer.classList.remove("hidden");
+          if (mon.qr_url !== lastRenderedQrUrl) {
+            lastRenderedQrUrl = mon.qr_url;
+            const canvasEl = document.getElementById("qr-canvas");
+            canvasEl.innerHTML = "";
+            new QRCode(canvasEl, { text: mon.qr_url, width: 200, height: 200 });
+          }
+        } else {
+          qrContainer.classList.add("hidden");
+        }
+
+        if (mon.status === "2FA_REQUIRED") {
+          twofaContainer.classList.remove("hidden");
+        } else {
+          twofaContainer.classList.add("hidden");
+        }
+      }
+
+      async function generateQrCode() {
+        const btn = document.getElementById("qr-btn");
+        btn.textContent = "Generating...";
+        const res = await fetch("/api/auth/qr", { method: "POST" });
+        const data = await res.json();
+        btn.textContent = "Refresh QR Code";
+        await fetchState();
+        // Poll every 2.5s while waiting for QR scan so UI updates immediately
+        const fastPoll = setInterval(async () => {
+          await fetchState();
+          const badgeText = document.getElementById("listener-badge").textContent;
+          if (badgeText === "ONLINE" || badgeText === "2FA_REQUIRED") {
+            clearInterval(fastPoll);
+          }
+        }, 2500);
+      }
+
+      async function submit2FA() {
+        const pwd = document.getElementById("twofa-password").value;
+        const btn = document.getElementById("twofa-btn");
+        btn.textContent = "Verifying...";
+        await fetch("/api/auth/2fa", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: pwd }),
+        });
+        btn.textContent = "Confirm 2FA Password";
+        document.getElementById("twofa-password").value = "";
+        await fetchState();
+      }
+
+          async function saveSettings() {
+            const statusEl = document.getElementById("save-status");
+            statusEl.textContent = "Saving...";
+            const payload = {
+              is_paused: isPaused,
+              target_folder: document.getElementById("target_folder").value,
+              folder_invite_link: document.getElementById("folder_invite_link").value,
+              llm_provider: document.getElementById("llm_provider").value,
+              llm_api_url: document.getElementById("llm_api_url").value,
+              llm_model: document.getElementById("llm_model").value,
+              llm_api_key: document.getElementById("llm_api_key").value,
+              min_score: document.getElementById("min_score").value,
+              target_keywords: document.getElementById("target_keywords").value,
+              stop_keywords: document.getElementById("stop_keywords").value,
+              system_prompt: document.getElementById("system_prompt").value,
+            };
+            const res = await fetch("/api/settings", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            const data = await res.json();
+            if (data.ok) {
+              document.getElementById("llm_api_key").value = "";
+              statusEl.textContent = `Active & Verified: ${data.active_model} (${data.api_key_preview})`;
+              statusEl.className = "text-xs text-emerald-400 font-semibold";
+              await fetchState();
+            } else {
+              statusEl.textContent = data.error || "Failed to verify model!";
+              statusEl.className = "text-xs text-red-400 font-bold";
+              alert("Ошибка подключения к нейронке:\n\n" + (data.error || "Неизвестная ошибка"));
+            }
+          }
+
+          async function togglePause() {
+            isPaused = !isPaused;
+            await saveSettings();
+            await fetchState();
+          }
+
+          async function runSandboxTest() {
+            const btn = document.getElementById("sandbox-btn");
+            const out = document.getElementById("sandbox-output");
+            const text = document.getElementById("sandbox-text").value;
+            const sendTg = document.getElementById("sandbox-send-tg").checked;
+
+            btn.textContent = "Evaluating...";
+            out.classList.remove("hidden");
+            out.textContent = "Calling active LLM endpoint...";
+
+            const res = await fetch("/api/test-llm", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ text: text, send_telegram: sendTg }),
+            });
+            const data = await res.json();
+            btn.textContent = "Test AI Model";
+            out.textContent = JSON.stringify(data, null, 2);
+          }
+
+          function setFilter(flt) {
+            currentFilter = flt;
+            ["all", "approved", "rejected", "scam"].forEach((k) => {
+              const el = document.getElementById(`flt-${k}`);
+              el.className = k === flt
+                ? "px-2.5 py-1 rounded bg-emerald-600 text-zinc-950 font-bold cursor-pointer"
+                : "px-2.5 py-1 rounded bg-zinc-800 text-zinc-300 cursor-pointer";
+            });
+            fetchState();
+          }
+
+          async function clearOrders() {
+            if (!confirm("Clear all stored order evaluations?")) return;
+            await fetch("/api/clear-orders", { method: "POST" });
+            fetchState();
+          }
+
+          // Zero-Drain Page Visibility API Controller
+          function startPolling() {
+            if (!pollTimer) {
+              pollTimer = setInterval(fetchState, 15000);
+            }
+          }
+
+          function stopPolling() {
+            if (pollTimer) {
+              clearInterval(pollTimer);
+              pollTimer = null;
+            }
+          }
+
+          document.addEventListener("visibilitychange", () => {
+            const powerBadge = document.getElementById("power-badge");
+            if (document.hidden) {
+              stopPolling();
+              powerBadge.textContent = "SYNC: SLEEPING (TAB HIDDEN)";
+              powerBadge.className = "px-2.5 py-0.5 text-xs rounded bg-zinc-800 border border-zinc-700 text-zinc-400";
+            } else {
+              powerBadge.textContent = "SYNC: ACTIVE (15s)";
+              powerBadge.className = "px-2.5 py-0.5 text-xs rounded bg-zinc-800 border border-zinc-700 text-emerald-400";
+              fetchState();
+              startPolling();
+            }
+          });
+
+        // Initialize on load
+        document.getElementById("llm_provider").value = "{{ settings.llm_provider }}";
+        populateModelDropdown("{{ settings.llm_provider }}", "{{ settings.llm_model }}");
+        updateStatusBadges("{{ monitor_status.status }}", isPaused);
+        renderOrders(initialOrders);
+        startPolling();
+    </script>
+  </body>
+</html>

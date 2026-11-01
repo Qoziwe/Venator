@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Venator // Authentication</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body
+    class="bg-zinc-950 text-zinc-100 min-h-screen flex items-center justify-center p-4 font-mono"
+  >
+    <div
+      class="w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-lg p-8 shadow-2xl"
+    >
+      <div
+        class="flex items-center justify-between border-b border-zinc-800 pb-4 mb-6"
+      >
+        <div>
+          <h1 class="text-xl font-bold tracking-wider text-emerald-400">
+            VENATOR // CORE
+          </h1>
+          <p class="text-xs text-zinc-400 mt-1">
+            AI-Powered Telegram Order Radar
+          </p>
+        </div>
+        <span
+          class="px-2.5 py-1 text-xs bg-zinc-800 text-zinc-300 rounded border border-zinc-700"
+          >PORT 5006</span
+        >
+      </div>
+
+      {% if error %}
+      <div
+        class="mb-5 p-3 bg-red-950/60 border border-red-800 text-red-300 text-xs rounded"
+      >
+        [AUTH_ERR]: {{ error }}
+      </div>
+      {% endif %}
+
+      <form method="POST" action="/login" class="space-y-5">
+        <div>
+          <label
+            class="block text-xs uppercase tracking-wider text-zinc-400 mb-2"
+          >
+            Administrator Password
+          </label>
+          <input
+            type="password"
+            name="password"
+            required
+            autofocus
+            placeholder="••••••••••••"
+            class="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded px-3.5 py-2.5 text-sm text-zinc-100 outline-none transition"
+          />
+        </div>
+        <button
+          type="submit"
+          class="w-full bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-bold py-2.5 rounded text-sm tracking-wide transition cursor-pointer"
+        >
+          UNLOCK TERMINAL
+        </button>
+      </form>
+    </div>
+  </body>
+</html>

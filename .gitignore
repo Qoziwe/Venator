@@ -1,0 +1,29 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Telegram MTProto Sessions (CRITICAL: Never commit session files)
+*.session
+*.session-journal
+
+# SQLite WAL Databases
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Python & Virtual Environment
+venv/
+.venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+*.log
