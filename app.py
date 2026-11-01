@@ -71,6 +71,9 @@ def dashboard():
         f"{raw_key[:6]}...{raw_key[-4:]}" if len(raw_key) > 12 else ("Set" if raw_key else "Not Set")
     )
     masked_settings["llm_api_key"] = ""
+    masked_settings["llm_api_key_2"] = ""
+    masked_settings["llm_api_key_3"] = ""
+    masked_settings["keys_info"] = database.get_all_api_keys()
 
     return render_template(
         "dashboard.html",
@@ -97,6 +100,8 @@ def api_state():
         "active_provider": settings.get("llm_provider", ""),
         "orders": database.get_orders(filter_type=filter_type, limit=50),
         "bans": database.get_ban_events(limit=20),
+        "keys": database.get_all_api_keys(),
+        "active_key_index": settings.get("llm_active_key_index", 0),
     })
 
 
@@ -124,14 +129,28 @@ def api_update_settings():
             updates[field] = data[field]
 
     new_key = str(data.get("llm_api_key", "")).strip()
-    test_key = new_key if new_key else current.get("llm_api_key", "")
-    updates["llm_api_key"] = test_key
+    if new_key:
+        updates["llm_api_key"] = new_key
+    elif "llm_api_key" not in updates:
+        updates["llm_api_key"] = current.get("llm_api_key", "")
 
-    # Live verification ping before saving
+    new_key_2 = str(data.get("llm_api_key_2", "")).strip()
+    if new_key_2 == "__CLEAR__":
+        updates["llm_api_key_2"] = ""
+    elif new_key_2:
+        updates["llm_api_key_2"] = new_key_2
+
+    new_key_3 = str(data.get("llm_api_key_3", "")).strip()
+    if new_key_3 == "__CLEAR__":
+        updates["llm_api_key_3"] = ""
+    elif new_key_3:
+        updates["llm_api_key_3"] = new_key_3
+
+    # Live verification ping before saving (test using primary key without rotating keys)
     test_cfg = dict(current)
     test_cfg.update(updates)
     test_res = monitor.analyze_post_with_llm(
-        "Ping test: verify model availability and JSON format", test_cfg
+        "Ping test: verify model availability and JSON format", test_cfg, allow_failover=False
     )
 
     if not test_res or "_error" in test_res:
@@ -157,6 +176,36 @@ def api_update_settings():
         "active_provider": updated["llm_provider"],
         "is_paused": updated["is_paused"],
         "api_key_preview": key_preview,
+        "keys": database.get_all_api_keys(),
+        "active_key_index": updated.get("llm_active_key_index", 0),
+    })
+
+
+@app.route("/api/reset-keys", methods=["POST"])
+@login_required
+def api_reset_keys():
+    """Reset key rotation limits and restore active key to Key #1."""
+    database.reset_key_rotation(force=True)
+    return jsonify({
+        "ok": True,
+        "message": "Key rotation reset. Key #1 is active.",
+        "keys": database.get_all_api_keys(),
+        "active_key_index": 0,
+    })
+
+
+@app.route("/api/delete-key/<int:key_index>", methods=["POST"])
+@login_required
+def api_delete_key(key_index: int):
+    """Clear configured key for slot (0, 1, or 2)."""
+    key_map = {0: "llm_api_key", 1: "llm_api_key_2", 2: "llm_api_key_3"}
+    field = key_map.get(key_index)
+    if not field:
+        return jsonify({"ok": False, "error": "Invalid key index"}), 400
+    database.update_settings({field: ""})
+    return jsonify({
+        "ok": True,
+        "keys": database.get_all_api_keys(),
     })
 
 

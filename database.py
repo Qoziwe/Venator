@@ -187,6 +187,7 @@ def init_db() -> None:
             """
         )
 
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         defaults = {
             "is_paused": "0",
             "target_folder": os.getenv("TG_TARGET_FOLDER", "Фриланс"),
@@ -195,7 +196,12 @@ def init_db() -> None:
             "llm_api_url": os.getenv(
                 "LLM_API_URL", "https://api.groq.com/openai/v1/chat/completions"
             ),
-            "llm_api_key": os.getenv("LLM_API_KEY", ""),
+            "llm_api_key": os.getenv("LLM_API_KEY", "") or os.getenv("LLM_API_KEY_1", ""),
+            "llm_api_key_2": os.getenv("LLM_API_KEY_2", ""),
+            "llm_api_key_3": os.getenv("LLM_API_KEY_3", ""),
+            "llm_active_key_index": "0",
+            "llm_exhausted_keys": "",
+            "llm_quota_reset_date": today_utc,
             "llm_model": os.getenv("LLM_MODEL", "openai/gpt-oss-120b"),
             "min_score": "70",
             "target_keywords": "\n".join(DEFAULT_TARGET_KEYWORDS),
@@ -220,10 +226,31 @@ def _refresh_memory_cache() -> dict[str, Any]:
         rows = conn.execute("SELECT key, value FROM settings").fetchall()
         raw = {row["key"]: row["value"] for row in rows}
 
-    # If .env has an API key and DB still has an empty string, sync it automatically
-    env_key = os.getenv("LLM_API_KEY", "")
+    today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    stored_reset_date = raw.get("llm_quota_reset_date", "")
+    if stored_reset_date != today_utc:
+        # A new day in UTC has arrived: reset exhausted keys and return to Key #1 (index 0)
+        raw["llm_quota_reset_date"] = today_utc
+        raw["llm_exhausted_keys"] = ""
+        raw["llm_active_key_index"] = "0"
+        with get_connection() as conn:
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('llm_quota_reset_date', ?)", (today_utc,))
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('llm_exhausted_keys', '')")
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('llm_active_key_index', '0')")
+            conn.commit()
+
+    # Sync from .env if DB key is missing or empty
+    env_key = os.getenv("LLM_API_KEY", "") or os.getenv("LLM_API_KEY_1", "")
     if not raw.get("llm_api_key") and env_key and not env_key.startswith("gsk_your_"):
         raw["llm_api_key"] = env_key
+
+    env_key_2 = os.getenv("LLM_API_KEY_2", "")
+    if not raw.get("llm_api_key_2") and env_key_2 and not env_key_2.startswith("gsk_your_"):
+        raw["llm_api_key_2"] = env_key_2
+
+    env_key_3 = os.getenv("LLM_API_KEY_3", "")
+    if not raw.get("llm_api_key_3") and env_key_3 and not env_key_3.startswith("gsk_your_"):
+        raw["llm_api_key_3"] = env_key_3
 
     target_lines = [
         line.strip()
@@ -250,6 +277,14 @@ def _refresh_memory_cache() -> dict[str, Any]:
         except re.error:
             compiled_stops.append(re.compile(re.escape(pattern), re.IGNORECASE))
 
+    exhausted_raw = raw.get("llm_exhausted_keys", "")
+    exhausted_list = [int(x) for x in exhausted_raw.split(",") if x.strip().isdigit()]
+
+    try:
+        active_idx = int(raw.get("llm_active_key_index", "0"))
+    except ValueError:
+        active_idx = 0
+
     parsed = {
         "is_paused": raw.get("is_paused", "0") == "1",
         "target_folder": raw.get("target_folder", "Фриланс").strip(),
@@ -258,7 +293,12 @@ def _refresh_memory_cache() -> dict[str, Any]:
         "llm_api_url": raw.get(
             "llm_api_url", "https://api.groq.com/openai/v1/chat/completions"
         ),
-        "llm_api_key": raw.get("llm_api_key", ""),
+        "llm_api_key": raw.get("llm_api_key", "").strip(),
+        "llm_api_key_2": raw.get("llm_api_key_2", "").strip(),
+        "llm_api_key_3": raw.get("llm_api_key_3", "").strip(),
+        "llm_active_key_index": active_idx,
+        "llm_exhausted_keys": exhausted_list,
+        "llm_quota_reset_date": raw.get("llm_quota_reset_date", today_utc),
         "llm_model": raw.get("llm_model", "openai/gpt-oss-120b"),
         "min_score": int(raw.get("min_score", "70") or 70),
         "target_keywords": "\n".join(target_lines),
@@ -304,6 +344,11 @@ def update_settings(updates: dict[str, Any]) -> dict[str, Any]:
         "llm_api_url",
         "llm_model",
         "llm_api_key",
+        "llm_api_key_2",
+        "llm_api_key_3",
+        "llm_active_key_index",
+        "llm_exhausted_keys",
+        "llm_quota_reset_date",
         "min_score",
         "target_keywords",
         "stop_keywords",
@@ -323,6 +368,123 @@ def update_settings(updates: dict[str, Any]) -> dict[str, Any]:
             )
         conn.commit()
     return _refresh_memory_cache()
+
+
+_key_rotation_lock = threading.Lock()
+
+
+def _mask_key(raw_k: str) -> str:
+    if not raw_k:
+        return "Не настроен"
+    if len(raw_k) > 12:
+        return f"{raw_k[:6]}...{raw_k[-4:]}"
+    return "Задан"
+
+
+def get_all_api_keys() -> list[dict[str, Any]]:
+    """Return status and preview for up to 3 configured API keys."""
+    cfg = get_settings()
+    active_idx = int(cfg.get("llm_active_key_index", 0))
+    exhausted = set(cfg.get("llm_exhausted_keys", []))
+
+    slot_defs = [
+        ("llm_api_key", "Ключ #1 (Основной)"),
+        ("llm_api_key_2", "Ключ #2 (Резервный 1)"),
+        ("llm_api_key_3", "Ключ #3 (Резервный 2)"),
+    ]
+
+    result = []
+    for idx, (field_name, label) in enumerate(slot_defs):
+        raw_k = str(cfg.get(field_name, "")).strip()
+        has_k = bool(raw_k)
+        is_exh = idx in exhausted
+        is_act = (idx == active_idx) and has_k and not is_exh
+
+        result.append({
+            "index": idx,
+            "slot": idx + 1,
+            "field": field_name,
+            "label": label,
+            "has_key": has_k,
+            "preview": _mask_key(raw_k),
+            "is_active": is_act,
+            "is_exhausted": is_exh,
+        })
+    return result
+
+
+def get_current_active_key() -> tuple[str, int]:
+    """
+    Return (api_key, index) for the currently active key.
+    If the active key is exhausted or missing, advances to the next available non-exhausted key.
+    """
+    with _key_rotation_lock:
+        cfg = get_settings()
+        keys = [
+            str(cfg.get("llm_api_key", "")).strip(),
+            str(cfg.get("llm_api_key_2", "")).strip(),
+            str(cfg.get("llm_api_key_3", "")).strip(),
+        ]
+        exhausted = set(cfg.get("llm_exhausted_keys", []))
+        active_idx = int(cfg.get("llm_active_key_index", 0))
+
+        # Check if currently active index is valid, has key and not exhausted
+        if 0 <= active_idx < len(keys) and keys[active_idx] and (active_idx not in exhausted):
+            return keys[active_idx], active_idx
+
+        # Otherwise, search forward for first available key starting from active_idx or 0
+        for idx in range(len(keys)):
+            if keys[idx] and (idx not in exhausted):
+                update_settings({"llm_active_key_index": idx})
+                return keys[idx], idx
+
+        # Fallback if all configured are exhausted or none configured
+        fallback_idx = min(max(0, active_idx), len(keys) - 1)
+        return keys[fallback_idx], fallback_idx
+
+
+def failover_to_next_key(current_index: int, reason: str = "") -> tuple[str | None, int | None]:
+    """
+    Mark key at current_index as exhausted for today and switch strictly to the next available backup key.
+    Returns (next_key, next_index) if another key is available, or (None, None) if all keys are exhausted.
+    """
+    with _key_rotation_lock:
+        cfg = get_settings()
+        keys = [
+            str(cfg.get("llm_api_key", "")).strip(),
+            str(cfg.get("llm_api_key_2", "")).strip(),
+            str(cfg.get("llm_api_key_3", "")).strip(),
+        ]
+        exhausted = set(cfg.get("llm_exhausted_keys", []))
+        exhausted.add(current_index)
+
+        # Search for the next available key strictly in sequential order (current_index + 1 .. 2)
+        next_idx: int | None = None
+        next_key: str | None = None
+        for idx in range(current_index + 1, len(keys)):
+            if keys[idx] and (idx not in exhausted):
+                next_idx = idx
+                next_key = keys[idx]
+                break
+
+        exh_str = ",".join(str(i) for i in sorted(exhausted))
+        updates: dict[str, Any] = {"llm_exhausted_keys": exh_str}
+        if next_idx is not None:
+            updates["llm_active_key_index"] = next_idx
+
+        update_settings(updates)
+        return next_key, next_idx
+
+
+def reset_key_rotation(force: bool = False) -> None:
+    """Reset exhausted keys list and switch active key back to Key #1 (index 0)."""
+    with _key_rotation_lock:
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        update_settings({
+            "llm_active_key_index": 0,
+            "llm_exhausted_keys": "",
+            "llm_quota_reset_date": today_utc,
+        })
 
 
 def log_order(

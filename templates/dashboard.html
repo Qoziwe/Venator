@@ -293,30 +293,150 @@
                 </div>
               </div>
 
-              <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                <div class="sm:col-span-2">
-                  <label class="block text-xs text-zinc-400 mb-1">
-                    New API Key (leave blank to keep current)
-                  </label>
-                  <input
-                    type="password"
-                    id="llm_api_key"
-                    placeholder="gsk_... / AIza... / sk-..."
-                    class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-zinc-100 text-xs"
-                  />
-                </div>
-                <div>
-                  <label class="block text-xs text-zinc-400 mb-1"
-                    >Min Score (%)</label
+              <div>
+                <label class="block text-xs text-zinc-400 mb-1"
+                  >Min Score (%) — минимальный порог соответствия для одобрения</label
+                >
+                <input
+                  type="number"
+                  id="min_score"
+                  min="0"
+                  max="100"
+                  value="{{ settings.min_score }}"
+                  class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-zinc-100 text-xs"
+                />
+              </div>
+
+              <!-- Cascade Multi-Key Management Panel (Up to 3 keys) -->
+              <div class="p-3.5 bg-zinc-950 border border-zinc-800 rounded-lg space-y-3">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs font-bold text-emerald-400 uppercase tracking-wide">
+                      Резервные API-ключи (до 3-х ключей)
+                    </span>
+                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 font-mono">
+                      Failover
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onclick="resetKeyRotation()"
+                    class="text-[11px] px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition flex items-center gap-1 cursor-pointer"
+                    title="Сбросить суточные лимиты и вернуть активный ключ на #1"
                   >
-                  <input
-                    type="number"
-                    id="min_score"
-                    min="0"
-                    max="100"
-                    value="{{ settings.min_score }}"
-                    class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-zinc-100 text-xs"
-                  />
+                    <span>🔄</span> <span>Сбросить лимиты</span>
+                  </button>
+                </div>
+
+                <p class="text-[11px] text-zinc-400 leading-relaxed">
+                  При исчерпании суточной квоты (HTTP 429 / Daily Quota) у текущего ключа система автоматически переключается на следующий. Переход происходит <b>строго только при исчерпании</b> текущего ключа.
+                </p>
+
+                <!-- 3 Key Slots -->
+                <div class="space-y-2">
+                  <!-- Slot 0: Primary Key -->
+                  <div class="p-2.5 bg-zinc-900 border border-zinc-800 rounded">
+                    <div class="flex items-center justify-between mb-1.5">
+                      <span class="text-xs font-medium text-zinc-200 flex items-center gap-1.5">
+                        <span class="text-zinc-400 font-mono">#1</span>
+                        <span>Основной ключ</span>
+                      </span>
+                      <span id="key-badge-0">
+                        {% set k0 = (settings.keys_info[0] if settings.keys_info else none) %}
+                        {% if k0 and k0.is_active %}
+                          <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-950 border border-emerald-600 text-emerald-300">АКТИВЕН ({{ k0.preview }})</span>
+                        {% elif k0 and k0.is_exhausted %}
+                          <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-red-950 border border-red-700 text-red-300">ИСЧЕРПАН ({{ k0.preview }})</span>
+                        {% elif k0 and k0.has_key %}
+                          <span class="text-[10px] font-medium px-2 py-0.5 rounded bg-zinc-800 text-zinc-300">ГОТОВ ({{ k0.preview }})</span>
+                        {% else %}
+                          <span class="text-[10px] text-zinc-500">НЕ НАСТРОЕН</span>
+                        {% endif %}
+                      </span>
+                    </div>
+                    <input
+                      type="password"
+                      id="llm_api_key"
+                      placeholder="Оставьте пустым, чтобы не менять ({{ settings.keys_info[0].preview if settings.keys_info else 'Not Set' }})"
+                      class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-1.5 text-zinc-100 text-xs font-mono"
+                    />
+                  </div>
+
+                  <!-- Slot 1: Backup Key 2 -->
+                  <div class="p-2.5 bg-zinc-900 border border-zinc-800 rounded">
+                    <div class="flex items-center justify-between mb-1.5">
+                      <span class="text-xs font-medium text-zinc-200 flex items-center gap-1.5">
+                        <span class="text-zinc-400 font-mono">#2</span>
+                        <span>Резервный ключ 1</span>
+                      </span>
+                      <span id="key-badge-1">
+                        {% set k1 = (settings.keys_info[1] if settings.keys_info and settings.keys_info|length > 1 else none) %}
+                        {% if k1 and k1.is_active %}
+                          <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-950 border border-emerald-600 text-emerald-300">АКТИВЕН ({{ k1.preview }})</span>
+                        {% elif k1 and k1.is_exhausted %}
+                          <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-red-950 border border-red-700 text-red-300">ИСЧЕРПАН ({{ k1.preview }})</span>
+                        {% elif k1 and k1.has_key %}
+                          <span class="text-[10px] font-medium px-2 py-0.5 rounded bg-zinc-800 text-zinc-300">ГОТОВ ({{ k1.preview }})</span>
+                        {% else %}
+                          <span class="text-[10px] text-zinc-500">НЕ НАСТРОЕН</span>
+                        {% endif %}
+                      </span>
+                    </div>
+                    <div class="flex gap-2">
+                      <input
+                        type="password"
+                        id="llm_api_key_2"
+                        placeholder="Оставьте пустым, чтобы не менять ({{ settings.keys_info[1].preview if settings.keys_info and settings.keys_info|length > 1 else 'Not Set' }})"
+                        class="flex-1 bg-zinc-950 border border-zinc-800 rounded px-3 py-1.5 text-zinc-100 text-xs font-mono"
+                      />
+                      <button
+                        type="button"
+                        onclick="clearKey(1)"
+                        class="px-2.5 py-1 text-xs text-zinc-400 hover:text-red-400 border border-zinc-800 hover:border-red-900 rounded bg-zinc-950 cursor-pointer"
+                        title="Удалить резервный ключ #2"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+
+                  <!-- Slot 2: Backup Key 3 -->
+                  <div class="p-2.5 bg-zinc-900 border border-zinc-800 rounded">
+                    <div class="flex items-center justify-between mb-1.5">
+                      <span class="text-xs font-medium text-zinc-200 flex items-center gap-1.5">
+                        <span class="text-zinc-400 font-mono">#3</span>
+                        <span>Резервный ключ 2</span>
+                      </span>
+                      <span id="key-badge-2">
+                        {% set k2 = (settings.keys_info[2] if settings.keys_info and settings.keys_info|length > 2 else none) %}
+                        {% if k2 and k2.is_active %}
+                          <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-950 border border-emerald-600 text-emerald-300">АКТИВЕН ({{ k2.preview }})</span>
+                        {% elif k2 and k2.is_exhausted %}
+                          <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-red-950 border border-red-700 text-red-300">ИСЧЕРПАН ({{ k2.preview }})</span>
+                        {% elif k2 and k2.has_key %}
+                          <span class="text-[10px] font-medium px-2 py-0.5 rounded bg-zinc-800 text-zinc-300">ГОТОВ ({{ k2.preview }})</span>
+                        {% else %}
+                          <span class="text-[10px] text-zinc-500">НЕ НАСТРОЕН</span>
+                        {% endif %}
+                      </span>
+                    </div>
+                    <div class="flex gap-2">
+                      <input
+                        type="password"
+                        id="llm_api_key_3"
+                        placeholder="Оставьте пустым, чтобы не менять ({{ settings.keys_info[2].preview if settings.keys_info and settings.keys_info|length > 2 else 'Not Set' }})"
+                        class="flex-1 bg-zinc-950 border border-zinc-800 rounded px-3 py-1.5 text-zinc-100 text-xs font-mono"
+                      />
+                      <button
+                        type="button"
+                        onclick="clearKey(2)"
+                        class="px-2.5 py-1 text-xs text-zinc-400 hover:text-red-400 border border-zinc-800 hover:border-red-900 rounded bg-zinc-950 cursor-pointer"
+                        title="Удалить резервный ключ #3"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -650,8 +770,10 @@
 
               updateStatusBadges(data.monitor.status, isPaused);
               syncAuthPanel(data.monitor);
-              updateStatusBadges(data.monitor.status, isPaused);
               renderOrders(data.orders);
+              if (data.keys) {
+                updateKeyBadges(data.keys, data.active_key_index);
+              }
             } catch (e) {
               console.error("State sync error:", e);
             }
@@ -728,39 +850,101 @@
         await fetchState();
       }
 
-          async function saveSettings() {
-            const statusEl = document.getElementById("save-status");
-            statusEl.textContent = "Saving...";
-            const payload = {
-              is_paused: isPaused,
-              target_folder: document.getElementById("target_folder").value,
-              folder_invite_link: document.getElementById("folder_invite_link").value,
-              llm_provider: document.getElementById("llm_provider").value,
-              llm_api_url: document.getElementById("llm_api_url").value,
-              llm_model: document.getElementById("llm_model").value,
-              llm_api_key: document.getElementById("llm_api_key").value,
-              min_score: document.getElementById("min_score").value,
-              target_keywords: document.getElementById("target_keywords").value,
-              stop_keywords: document.getElementById("stop_keywords").value,
-              system_prompt: document.getElementById("system_prompt").value,
-            };
-            const res = await fetch("/api/settings", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload),
-            });
-            const data = await res.json();
-            if (data.ok) {
-              document.getElementById("llm_api_key").value = "";
-              statusEl.textContent = `Active & Verified: ${data.active_model} (${data.api_key_preview})`;
-              statusEl.className = "text-xs text-emerald-400 font-semibold";
-              await fetchState();
-            } else {
-              statusEl.textContent = data.error || "Failed to verify model!";
-              statusEl.className = "text-xs text-red-400 font-bold";
-              alert("Ошибка подключения к нейронке:\n\n" + (data.error || "Неизвестная ошибка"));
-            }
+      function updateKeyBadges(keys, activeIdx) {
+        if (!keys || !Array.isArray(keys)) return;
+        keys.forEach((k) => {
+          const badgeEl = document.getElementById(`key-badge-${k.index}`);
+          if (!badgeEl) return;
+          let badgeHtml = "";
+          if (k.is_active) {
+            badgeHtml = `<span class="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-950 border border-emerald-600 text-emerald-300">АКТИВЕН (${escapeHtml(k.preview)})</span>`;
+          } else if (k.is_exhausted) {
+            badgeHtml = `<span class="text-[10px] font-bold px-2 py-0.5 rounded bg-red-950 border border-red-700 text-red-300">ИСЧЕРПАН (${escapeHtml(k.preview)})</span>`;
+          } else if (k.has_key) {
+            badgeHtml = `<span class="text-[10px] font-medium px-2 py-0.5 rounded bg-zinc-800 text-zinc-300">ГОТОВ (${escapeHtml(k.preview)})</span>`;
+          } else {
+            badgeHtml = `<span class="text-[10px] text-zinc-500">НЕ НАСТРОЕН</span>`;
           }
+          badgeEl.innerHTML = badgeHtml;
+
+          const inputId = k.index === 0 ? "llm_api_key" : `llm_api_key_${k.index + 1}`;
+          const inputEl = document.getElementById(inputId);
+          if (inputEl) {
+            inputEl.placeholder = `Оставьте пустым, чтобы не менять (${escapeHtml(k.preview)})`;
+          }
+        });
+      }
+
+      async function resetKeyRotation() {
+        try {
+          const res = await fetch("/api/reset-keys", { method: "POST" });
+          const data = await res.json();
+          if (data.ok) {
+            updateKeyBadges(data.keys, data.active_key_index);
+            const statusEl = document.getElementById("save-status");
+            statusEl.textContent = "Лимиты сброшены! Активен Ключ #1";
+            statusEl.className = "text-xs text-emerald-400 font-semibold";
+            await fetchState();
+          }
+        } catch (e) {
+          console.error("Failed to reset keys:", e);
+        }
+      }
+
+      async function clearKey(index) {
+        if (!confirm(`Удалить резервный ключ #${index + 1}?`)) return;
+        try {
+          const res = await fetch(`/api/delete-key/${index}`, { method: "POST" });
+          const data = await res.json();
+          if (data.ok) {
+            updateKeyBadges(data.keys);
+            await fetchState();
+          }
+        } catch (e) {
+          console.error("Failed to clear key:", e);
+        }
+      }
+
+      async function saveSettings() {
+        const statusEl = document.getElementById("save-status");
+        statusEl.textContent = "Saving...";
+        const payload = {
+          is_paused: isPaused,
+          target_folder: document.getElementById("target_folder").value,
+          folder_invite_link: document.getElementById("folder_invite_link").value,
+          llm_provider: document.getElementById("llm_provider").value,
+          llm_api_url: document.getElementById("llm_api_url").value,
+          llm_model: document.getElementById("llm_model").value,
+          llm_api_key: document.getElementById("llm_api_key").value,
+          llm_api_key_2: document.getElementById("llm_api_key_2").value,
+          llm_api_key_3: document.getElementById("llm_api_key_3").value,
+          min_score: document.getElementById("min_score").value,
+          target_keywords: document.getElementById("target_keywords").value,
+          stop_keywords: document.getElementById("stop_keywords").value,
+          system_prompt: document.getElementById("system_prompt").value,
+        };
+        const res = await fetch("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          document.getElementById("llm_api_key").value = "";
+          document.getElementById("llm_api_key_2").value = "";
+          document.getElementById("llm_api_key_3").value = "";
+          statusEl.textContent = `Active & Verified: ${data.active_model} (Active: Key #${(data.active_key_index || 0) + 1})`;
+          statusEl.className = "text-xs text-emerald-400 font-semibold";
+          if (data.keys) {
+            updateKeyBadges(data.keys, data.active_key_index);
+          }
+          await fetchState();
+        } else {
+          statusEl.textContent = data.error || "Failed to verify model!";
+          statusEl.className = "text-xs text-red-400 font-bold";
+          alert("Ошибка подключения к нейронке:\n\n" + (data.error || "Неизвестная ошибка"));
+        }
+      }
 
           async function togglePause() {
             isPaused = !isPaused;

@@ -123,38 +123,14 @@ def send_bot_notification(text: str) -> bool:
         return False
 
 
-def analyze_post_with_llm(
-    post_text: str, custom_settings: dict[str, Any] | None = None
-) -> dict[str, Any] | None:
-    """
-    Evaluate a Telegram post using the currently configured OpenAI-compatible LLM.
-    Reads configuration from RAM cache unless custom_settings are passed for testing.
-    """
-    cfg = custom_settings or database.get_settings()
-    api_url = cfg.get("llm_api_url", "").strip()
-    api_key = cfg.get("llm_api_key", "").strip()
-    model = cfg.get("llm_model", "openai/gpt-oss-120b").strip()
-    system_prompt = cfg.get("system_prompt", database.DEFAULT_SYSTEM_PROMPT)
-
-    if not api_url:
-        logging.error("LLM_API_URL is empty.")
-        return None
-
-    user_prompt = (
-        f"Telegram Post to evaluate:\n"
-        f"\"\"\"\n{post_text[:3000]}\n\"\"\"\n\n"
-        f"Evaluate this post against the developer profile and anti-scam rules.\n"
-        f"You MUST output strictly a JSON object with this exact schema:\n"
-        f"{{\n"
-        f'  "approved": true or false,\n'
-        f'  "match_score": integer from 0 to 100,\n'
-        f'  "is_scam": true or false,\n'
-        f'  "summary": "1 short sentence describing the task and budget",\n'
-        f'  "reason": "1 short sentence explaining why it matches or why rejected",\n'
-        f'  "recommended_pitch": "A or B or C"\n'
-        f"}}"
-    )
-
+def _send_llm_request(
+    api_url: str,
+    api_key: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+) -> tuple[dict[str, Any] | None, str | None, int | None]:
+    """Execute raw HTTP request to OpenAI-compatible LLM endpoint."""
     body: dict[str, Any] = {
         "model": model,
         "temperature": 0.1,
@@ -195,14 +171,142 @@ def analyze_post_with_llm(
 
             parsed = json.loads(content)
             parsed["_model_used"] = model
-            return parsed
+            return parsed, None, 200
     except urllib.error.HTTPError as http_err:
-        err_body = http_err.read().decode("utf-8", errors="replace")[:300]
+        err_body = http_err.read().decode("utf-8", errors="replace")[:400]
         logging.error(f"LLM HTTP {http_err.code}: {err_body}")
-        return {"_error": f"HTTP {http_err.code}: {err_body}"}
+        return None, f"HTTP {http_err.code}: {err_body}", http_err.code
     except Exception as exc:
         logging.error(f"LLM evaluation error: {exc}")
-        return {"_error": str(exc)}
+        return None, str(exc), None
+
+
+def analyze_post_with_llm(
+    post_text: str,
+    custom_settings: dict[str, Any] | None = None,
+    allow_failover: bool = True,
+) -> dict[str, Any] | None:
+    """
+    Evaluate a Telegram post using the configured OpenAI-compatible LLM.
+    Supports automatic cascade failover across up to 3 API keys upon daily quota/rate limit exhaustion.
+    """
+    cfg = custom_settings or database.get_settings()
+    api_url = cfg.get("llm_api_url", "").strip()
+    model = cfg.get("llm_model", "openai/gpt-oss-120b").strip()
+    system_prompt = cfg.get("system_prompt", database.DEFAULT_SYSTEM_PROMPT)
+
+    if not api_url:
+        logging.error("LLM_API_URL is empty.")
+        return {"_error": "LLM_API_URL is empty"}
+
+    user_prompt = (
+        f"Telegram Post to evaluate:\n"
+        f"\"\"\"\n{post_text[:3000]}\n\"\"\"\n\n"
+        f"Evaluate this post against the developer profile and anti-scam rules.\n"
+        f"You MUST output strictly a JSON object with this exact schema:\n"
+        f"{{\n"
+        f'  "approved": true or false,\n'
+        f'  "match_score": integer from 0 to 100,\n'
+        f'  "is_scam": true or false,\n'
+        f'  "summary": "1 short sentence describing the task and budget",\n'
+        f'  "reason": "1 short sentence explaining why it matches or why rejected",\n'
+        f'  "recommended_pitch": "A or B or C"\n'
+        f"}}"
+    )
+
+    # If testing via explicit custom_settings without failover (e.g. settings verification ping)
+    if custom_settings is not None and not allow_failover:
+        api_key = custom_settings.get("llm_api_key", "").strip()
+        parsed, err, _ = _send_llm_request(api_url, api_key, model, system_prompt, user_prompt)
+        if parsed is not None:
+            return parsed
+        return {"_error": err or "Unknown LLM error"}
+
+    # Automatic cascade failover across up to 3 configured keys
+    while True:
+        api_key, key_idx = database.get_current_active_key()
+        if not api_key:
+            return {"_error": "No active LLM API key configured"}
+
+        parsed, err_msg, status_code = _send_llm_request(
+            api_url, api_key, model, system_prompt, user_prompt
+        )
+
+        if parsed is not None:
+            parsed["_key_index"] = key_idx
+            return parsed
+
+        err_str = str(err_msg or "")
+        err_lower = err_str.lower()
+
+        # Check rate limit (HTTP 429) and auth (401/403)
+        is_429 = (status_code == 429) or ("429" in err_str) or ("rate_limit" in err_lower)
+        is_auth_error = status_code in (401, 403)
+
+        # Detect daily quota exhaustion
+        is_daily_quota = is_auth_error or any(
+            marker in err_lower
+            for marker in (
+                "tokens per day",
+                "requests per day",
+                "tpd",
+                "rpd",
+                "per day",
+                "daily",
+                "insufficient_quota",
+                "quota_exceeded",
+                "exceeded your current quota",
+                "billing",
+            )
+        )
+
+        # Handle short TPM bursts (e.g. "try again in 10s") before switching keys
+        if is_429 and not is_daily_quota:
+            m = re.search(r"try again in ([0-9.]+)\s*s", err_str, re.IGNORECASE)
+            wait_s = float(m.group(1)) if m else 0.0
+            if 0 < wait_s <= 12.0:
+                logging.info(
+                    f"⏳ TPM burst limit on Key #{key_idx + 1}. Waiting {wait_s:.1f}s before retry..."
+                )
+                time.sleep(wait_s + 0.5)
+                # Retry once with current key
+                parsed, err_msg, status_code = _send_llm_request(
+                    api_url, api_key, model, system_prompt, user_prompt
+                )
+                if parsed is not None:
+                    parsed["_key_index"] = key_idx
+                    return parsed
+                err_str = str(err_msg or "")
+                err_lower = err_str.lower()
+
+        # If key quota or limits are exhausted, failover to the next key
+        if is_429 or is_auth_error or is_daily_quota:
+            logging.warning(
+                f"⚠️ Key #{key_idx + 1} quota/limit exhausted ({err_str}). Switching to next key..."
+            )
+            next_key, next_idx = database.failover_to_next_key(key_idx, reason=err_str)
+            if next_key is not None and next_idx is not None:
+                send_bot_notification(
+                    f"🔄 <b>Venator: Ротация API-ключей</b>\n"
+                    f"⚠️ <b>Ключ #{key_idx + 1}</b> исчерпал лимит/квоту.\n"
+                    f"➡️ Автоматически переключено на <b>Ключ #{next_idx + 1}</b> (из 3).\n"
+                    f"Пост отправлен на повторный анализ."
+                )
+                logging.info(
+                    f"🔄 Switched from Key #{key_idx + 1} to Key #{next_idx + 1}. Retrying post..."
+                )
+                continue
+
+            # All configured keys (up to 3) are exhausted
+            send_error_alert(
+                "All AI Keys Quota Exhausted",
+                f"Все доступные API-ключи (до 3) исчерпали квоту. Мониторинг приостановлен до сброса суточных лимитов (00:00 UTC) или добавления новых ключей. Ошибка: {err_str}",
+                cooldown_seconds=300,
+            )
+            return {"_error": f"All AI API keys exhausted. Last error: {err_str}"}
+
+        # Any non-quota error
+        return {"_error": err_str}
 
 
 async def _wait_for_qr_scan(qr_login: Any) -> None:
@@ -586,24 +690,25 @@ async def _run_telethon_loop(interactive_auth: bool = False) -> None:
             logging.info(f"🧠 Calling LLM ({cfg.get('llm_model')}) for '{chat_title}'...")
             loop = asyncio.get_running_loop()
             verdict = await loop.run_in_executor(
-                None, analyze_post_with_llm, raw_text, cfg
+                None, analyze_post_with_llm, raw_text
             )
             if not verdict or "_error" in verdict:
                 err_msg = str(verdict.get('_error') if verdict else 'Empty response from LLM provider')
                 logging.error(f"❌ LLM error: {err_msg}")
 
-                if "429" in err_msg or "rate_limit" in err_msg.lower():
-                    send_error_alert(
-                        "AI Rate Limit Reached (HTTP 429)",
-                        f"Groq limits exceeded for model '{cfg.get('llm_model')}'. Post from '{chat_title}' skipped. Error: {err_msg}",
-                        cooldown_seconds=300
-                    )
-                else:
-                    send_error_alert(
-                        "AI Model / API Failure",
-                        f"Failed evaluating post from '{chat_title}' using '{cfg.get('llm_model')}': {err_msg}",
-                        cooldown_seconds=120
-                    )
+                if "all ai keys quota exhausted" not in err_msg.lower() and "all ai api keys exhausted" not in err_msg.lower():
+                    if "429" in err_msg or "rate_limit" in err_msg.lower():
+                        send_error_alert(
+                            "AI Rate Limit Reached (HTTP 429)",
+                            f"Limits exceeded for model '{cfg.get('llm_model')}'. Post from '{chat_title}' skipped. Error: {err_msg}",
+                            cooldown_seconds=300
+                        )
+                    else:
+                        send_error_alert(
+                            "AI Model / API Failure",
+                            f"Failed evaluating post from '{chat_title}' using '{cfg.get('llm_model')}': {err_msg}",
+                            cooldown_seconds=120
+                        )
                 return
 
             logging.info(f"🔍 Raw LLM Output: {verdict}")

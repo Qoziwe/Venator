@@ -55,8 +55,11 @@ The system operates across two decoupled network paths:
 * **Shared Folder Link Support (`t.me/addlist/...`):** When a shared folder invite link is provided, Venator checks and updates membership automatically via `CheckChatlistInviteRequest` and `JoinChatlistInviteRequest`.
 * **Dynamic Re-Sync:** Subscribes to `UpdateDialogFilter` events; adding or removing channels in the Telegram client updates the monitored peer list instantly without restart.
 
-### D. Automated Error Detection & Rate Limit Safeguards
-* **HTTP 429 (Rate Limit) Alerting:** Detects Groq or OpenAI rate limit errors immediately and dispatches an emergency notification to Telegram detailing quota limits and reset schedules.
+### D. Automated Error Detection & Cascade Multi-Key Failover
+* **Cascade Multi-Key Rotation (Up to 3 Keys):** Supports configuring up to 3 API keys (`LLM_API_KEY`, `LLM_API_KEY_2`, `LLM_API_KEY_3`). Execution remains strictly on Key #1 and transitions to Key #2 (and subsequently Key #3) only when the active key exhausts its daily quota (HTTP 429 / TPD / RPD) or returns authentication/depletion errors.
+* **TPM (Tokens Per Minute) Backoff:** Intercepts short per-minute burst rate limits (`try again in 10s`), waits the specified seconds, and retries the current key before switching, ensuring zero dropped messages during momentary message surges.
+* **Daily Quota Auto-Reset (00:00 UTC):** Daily exhaustion tracking automatically resets at UTC midnight (aligned with Groq/OpenAI quota reset cycles), returning priority back to Key #1.
+* **All Keys Exhausted Alerting:** Dispatches an emergency Telegram alert only when all configured keys (up to 3) have depleted their daily allowances.
 * **Anti-Flood Debounce:** Error alerts implement a 3-minute (`180s`) cooldown window per distinct error type, preventing notification storms when multiple posts arrive during provider downtime.
 * **Ban & Kick Detection:** Monitors `events.ChatAction` and `types.UpdateChannel` (`ChannelForbidden`, `ChannelPrivateError`, `UserBannedInChannelError`), notifying the primary user if the listener account is removed from any monitored chat.
 
